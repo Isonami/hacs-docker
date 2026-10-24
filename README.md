@@ -1,5 +1,6 @@
 # HACS Docker images
 
+
 This repository turns pinned [HACS](https://hacs.xyz/) integrations into data-only OCI images for Kubernetes [image volumes](https://kubernetes.io/docs/tasks/configure-pod-container/image-volumes/). Each image contains one integration at its filesystem root, ready to mount at `/config/custom_components/<domain>` in a Home Assistant pod.
 
 ## Published image
