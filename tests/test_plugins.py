@@ -52,11 +52,30 @@ class ConfigTests(unittest.TestCase):
             {"domain": "Bad-Domain"},
             {"artifact": "tag-source", "asset_pattern": "*.zip"},
             {"unexpected": True},
+            {"type": "unknown"},
+            {"entrypoint": "card.js"},
+            {"type": "frontend", "entrypoint": "card.js"},
         ]
         for change in cases:
             with self.subTest(change=change), tempfile.TemporaryDirectory() as root:
                 with self.assertRaises(plugins.PluginError):
                     plugins.load_plugin(self.make_config(root, **change), Path(root))
+
+    def test_frontend_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = self.make_config(root, type="frontend", source_path="dist", entrypoint="card.js")
+            data = json.loads(path.read_text())
+            del data["domain"]
+            path.write_text(json.dumps(data))
+            plugin = plugins.load_plugin(path, Path(root))
+            self.assertEqual(plugin.type, "frontend")
+            self.assertEqual(plugin.entrypoint, "card.js")
+            self.assertNotIn("domain", plugin.as_dict())
+            for entrypoint in (None, "../card.js", "nested/card.js", "card.css", ""):
+                with self.subTest(entrypoint=entrypoint):
+                    path.write_text(json.dumps({**data, "entrypoint": entrypoint}))
+                    with self.assertRaises(plugins.PluginError):
+                        plugins.load_plugin(path, Path(root))
 
     def test_plan_is_exact_and_stable(self):
         with tempfile.TemporaryDirectory() as root:
@@ -185,6 +204,46 @@ class ArtifactTests(unittest.TestCase):
             output = Path(root) / "out"
             plugins.prepare_zip(archive, self.plugin(), output)
             self.assertTrue((output / "translations/en.json").is_file())
+
+    def frontend(self):
+        return plugins.Plugin("card", "owner/repo", "v1", "release-source", "dist", None,
+                              type="frontend", entrypoint="card.js")
+
+    def test_prepare_frontend_source_and_bundled_assets(self):
+        archive = make_zip({
+            "wrapper/LICENSE.md": "license",
+            "wrapper/dist/card.js": "import './chunk.js';",
+            "wrapper/dist/chunk.js": "// editor",
+            "wrapper/dist/images/sunny.jpg": "image",
+            "wrapper/src/index.ts": "not distributed",
+        })
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / "out"
+            plugins.prepare_zip(archive, self.frontend(), output)
+            self.assertTrue((output / "card.js").is_file())
+            self.assertTrue((output / "chunk.js").is_file())
+            self.assertTrue((output / "images/sunny.jpg").is_file())
+            self.assertTrue((output / ".hacs-docker/licenses/LICENSE.md").is_file())
+            self.assertFalse((output / "src").exists())
+
+    def test_prepare_frontend_direct_asset(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / "out"
+            plugins.prepare_zip(make_zip({"card.js": "// card"}), self.frontend(), output)
+            self.assertTrue((output / "card.js").is_file())
+
+    def test_prepare_frontend_rejects_invalid_archives(self):
+        cases = [
+            make_zip({"wrapper/src/card.js": "// wrong directory"}),
+            make_zip({"wrapper/dist/card.js": "  "}),
+            make_zip({"a/dist/card.js": "// a", "b/dist/card.js": "// b"}),
+            make_zip({"dist/card.js": "// card", "../escape": "bad"}),
+            make_zip({"dist/card.js": "// card"}, symlink="dist/link"),
+        ]
+        for archive in cases:
+            with self.subTest(size=len(archive)), tempfile.TemporaryDirectory() as root:
+                with self.assertRaises(plugins.PluginError):
+                    plugins.prepare_zip(archive, self.frontend(), Path(root) / "out")
 
     def test_prepare_rejects_bad_archives(self):
         valid_manifest = json.dumps({"domain": "my_domain"})

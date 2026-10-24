@@ -1,14 +1,16 @@
 # HACS Docker images
 
 
-This repository turns pinned [HACS](https://hacs.xyz/) integrations into data-only OCI images for Kubernetes [image volumes](https://kubernetes.io/docs/tasks/configure-pod-container/image-volumes/). Each image contains one integration at its filesystem root, ready to mount at `/config/custom_components/<domain>` in a Home Assistant pod.
+This repository turns pinned [HACS](https://hacs.xyz/) integrations into data-only OCI images for Kubernetes [image volumes](https://kubernetes.io/docs/tasks/configure-pod-container/image-volumes/). Each image contains one integration or frontend card at its filesystem root, ready to mount at `/config/custom_components/<domain>` or `/config/www/<plugin-name>` in a Home Assistant pod.
 
-## Published image
+## Configured images
 
-The initial configuration publishes:
+The configuration publishes:
 
 ```text
 ghcr.io/isonami/hacs-docker/ha-nl-weather:v0.13.1
+ghcr.io/isonami/hacs-docker/pogoda-home-assistant:v0.0.10
+ghcr.io/isonami/hacs-docker/weather-forecast-extended:1.3.0
 ```
 
 A successful publication also creates the repository tag and GitHub Release `ha-nl-weather-v0.13.1`. The release notes record the mutable version reference, multi-platform manifest digest, immutable digest reference, upstream tag, and resolved upstream commit. Releases have no attached archives.
@@ -37,7 +39,11 @@ Fields:
 - `artifact`: optional, defaults to `auto`. Supported values are `auto`, `release-asset`, `release-source`, and `tag-source`.
 - `asset_pattern`: optional case-sensitive glob for a release ZIP asset. It is valid only with `auto` or `release-asset`. Without it, a release must contain exactly one ZIP asset or selection fails as ambiguous.
 - `source_path`: integration path inside an upstream source archive.
-- `domain`: expected `domain` in the integration's `manifest.json`.
+- `domain`: expected `domain` in the integration's `manifest.json` (integration plugins only).
+- `type`: optional, defaults to `integration`; use `frontend` for dashboard cards.
+- `entrypoint`: required JavaScript filename for frontend plugins, instead of `domain`. The entire `source_path` directory is included to preserve bundled assets.
+
+For example, Weather Forecast Extended uses `type: "frontend"`, `source_path: "dist"`, and `entrypoint: "weatherforecastextended.js"` from the upstream release source archive. No upstream build scripts are run.
 
 `auto` tries, in order:
 
@@ -45,7 +51,7 @@ Fields:
 2. The GitHub source ZIP for the named release.
 3. The GitHub source archive for the tag.
 
-Fallback occurs only when a release or artifact is absent. Authentication, network, corrupt archive, unsafe path, and extraction errors stop publication. Upstream code is never executed. Archive traversal and symlinks are rejected, and the manifest domain must match the configuration. Repository-level license/notice files are copied to `.hacs-docker/licenses/` inside the image.
+Fallback occurs only when a release or artifact is absent. Authentication, network, corrupt archive, unsafe path, and extraction errors stop publication. Upstream code is never executed. Archive traversal and symlinks are rejected, and the manifest domain must match the configuration for integrations. Frontend cards must contain the configured non-empty JavaScript entrypoint. Repository-level license/notice files are copied to `.hacs-docker/licenses/` inside the image.
 
 Run local checks with:
 
@@ -94,6 +100,8 @@ An arbitrary tag that does not exactly match a configuration fails validation.
 ## Kubernetes image volume
 
 See [`examples/home-assistant.yaml`](examples/home-assistant.yaml). The image root is mounted read-only at the integration directory. Image volumes require Kubernetes/runtime support for the `image` volume source (beta and enabled by default in Kubernetes 1.33). Confirm support in the Kubernetes version and container runtime used by your cluster.
+
+The example also mounts Yandex Pogoda at `/config/custom_components/yandex_pogoda` and Weather Forecast Extended at `/config/www/weather-forecast-extended`. After deployment, add `/local/weather-forecast-extended/weatherforecastextended.js` as a **JavaScript module** in Home Assistant's dashboard resources. Configure Yandex Pogoda through Home Assistant's integrations UI.
 
 Image volumes do **not** install Python packages declared in a Home Assistant integration manifest. Home Assistant must be able to install those requirements itself, or its runtime image must already provide them.
 

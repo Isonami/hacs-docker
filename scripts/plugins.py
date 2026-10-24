@@ -52,8 +52,10 @@ class Plugin:
     version: str
     artifact: str
     source_path: str
-    domain: str
+    domain: str | None
     asset_pattern: str | None = None
+    type: str = "integration"
+    entrypoint: str | None = None
 
     @property
     def tag(self) -> str:
@@ -69,6 +71,11 @@ class Plugin:
             "domain": self.domain,
             "tag": self.tag,
         }
+        if self.domain is None:
+            del result["domain"]
+        if self.type != "integration":
+            result["type"] = self.type
+            result["entrypoint"] = self.entrypoint
         if self.asset_pattern is not None:
             result["asset_pattern"] = self.asset_pattern
         return result
@@ -101,17 +108,22 @@ def load_plugin(config_path: Path, plugins_dir: Path | None = None) -> Plugin:
         raise PluginError(f"cannot read {config_path}: {exc}") from exc
     if not isinstance(data, dict):
         raise PluginError(f"configuration must be an object: {config_path}")
-    allowed = {"repository", "version", "artifact", "asset_pattern", "source_path", "domain"}
+    allowed = {"repository", "version", "artifact", "asset_pattern", "source_path", "domain", "type", "entrypoint"}
     unknown = set(data) - allowed
     if unknown:
         raise PluginError(f"unknown configuration keys: {', '.join(sorted(unknown))}")
-    missing = {"repository", "version", "source_path", "domain"} - set(data)
+    plugin_type = data.get("type", "integration")
+    if plugin_type not in ("integration", "frontend"):
+        raise PluginError("type must be integration or frontend")
+    required = {"domain"} if plugin_type == "integration" else {"entrypoint"}
+    missing = ({"repository", "version", "source_path"} | required) - set(data)
     if missing:
         raise PluginError(f"missing configuration keys: {', '.join(sorted(missing))}")
     repository = data["repository"]
     version = data["version"]
     artifact = data.get("artifact", "auto")
-    domain = data["domain"]
+    domain = data.get("domain")
+    entrypoint = data.get("entrypoint")
     asset_pattern = data.get("asset_pattern")
     if not isinstance(repository, str) or not REPOSITORY_RE.fullmatch(repository):
         raise PluginError("repository must be owner/repo")
@@ -119,13 +131,22 @@ def load_plugin(config_path: Path, plugins_dir: Path | None = None) -> Plugin:
         raise PluginError("version is not safe for Git tags and OCI image tags")
     if artifact not in ARTIFACTS:
         raise PluginError(f"artifact must be one of: {', '.join(sorted(ARTIFACTS))}")
-    if not isinstance(domain, str) or not DOMAIN_RE.fullmatch(domain):
-        raise PluginError("domain must contain lowercase letters, digits, and underscores")
+    if plugin_type == "integration":
+        if not isinstance(domain, str) or not DOMAIN_RE.fullmatch(domain):
+            raise PluginError("domain must contain lowercase letters, digits, and underscores")
+        if "entrypoint" in data:
+            raise PluginError("entrypoint is only valid for frontend plugins")
+    else:
+        if "domain" in data:
+            raise PluginError("domain is only valid for integration plugins")
+        entrypoint = _safe_relative_path(entrypoint, "entrypoint")
+        if not entrypoint.endswith(".js") or "/" in entrypoint:
+            raise PluginError("entrypoint must be a JavaScript filename")
     if asset_pattern is not None and (not isinstance(asset_pattern, str) or not asset_pattern):
         raise PluginError("asset_pattern must be a non-empty string")
     if asset_pattern is not None and artifact not in {"auto", "release-asset"}:
         raise PluginError("asset_pattern is only valid for auto or release-asset")
-    return Plugin(name, repository, version, artifact, _safe_relative_path(data["source_path"], "source_path"), domain, asset_pattern)
+    return Plugin(name, repository, version, artifact, _safe_relative_path(data["source_path"], "source_path"), domain, asset_pattern, plugin_type, entrypoint)
 
 
 def load_plugins(plugins_dir: Path) -> list[Plugin]:
@@ -291,7 +312,8 @@ def prepare_zip(data: bytes, plugin: Plugin, destination: Path) -> None:
     with archive:
         entries = _zip_paths(archive)
         files = {path: info for info, path in entries if not info.is_dir()}
-        manifest_dirs = {path.parent for path in files if path.name == "manifest.json"}
+        marker = plugin.entrypoint if plugin.type == "frontend" else "manifest.json"
+        manifest_dirs = {path.parent for path in files if path.name == marker}
         source_parts = PurePosixPath(plugin.source_path).parts
         candidates = []
         for directory in manifest_dirs:
@@ -299,15 +321,18 @@ def prepare_zip(data: bytes, plugin: Plugin, destination: Path) -> None:
                 candidates.append(directory)
         candidates = sorted(set(candidates), key=str)
         if len(candidates) != 1:
-            raise PluginError(f"expected exactly one integration manifest, found {len(candidates)}")
+            raise PluginError(f"expected exactly one plugin directory containing {marker}, found {len(candidates)}")
         source = candidates[0]
-        manifest_path = source / "manifest.json"
-        try:
-            manifest = json.loads(archive.read(files[manifest_path]))
-        except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise PluginError("integration manifest.json is invalid") from exc
-        if not isinstance(manifest, dict) or manifest.get("domain") != plugin.domain:
-            raise PluginError(f"manifest domain does not match configured domain {plugin.domain!r}")
+        if plugin.type == "integration":
+            manifest_path = source / "manifest.json"
+            try:
+                manifest = json.loads(archive.read(files[manifest_path]))
+            except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise PluginError("integration manifest.json is invalid") from exc
+            if not isinstance(manifest, dict) or manifest.get("domain") != plugin.domain:
+                raise PluginError(f"manifest domain does not match configured domain {plugin.domain!r}")
+        elif not archive.read(files[source / marker]).strip():
+            raise PluginError("frontend entrypoint is empty")
         if destination.exists():
             shutil.rmtree(destination)
         destination.mkdir(parents=True)

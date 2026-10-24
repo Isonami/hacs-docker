@@ -1,0 +1,8 @@
+{
+  "repository": "yandex/pogoda-home-assistant",
+  "version": "v0.0.10",
+  "artifact": "auto",
+  "asset_pattern": "yandex_pogoda.zip",
+  "source_path": "custom_components/yandex_pogoda",
+  "domain": "yandex_pogoda"
+}

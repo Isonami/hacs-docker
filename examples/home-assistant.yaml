@@ -27,6 +27,12 @@ spec:
             - name: nl-weather
               mountPath: /config/custom_components/nl_weather
               readOnly: true
+            - name: yandex-pogoda
+              mountPath: /config/custom_components/yandex_pogoda
+              readOnly: true
+            - name: weather-forecast-extended
+              mountPath: /config/www/weather-forecast-extended
+              readOnly: true
       volumes:
         - name: config
           persistentVolumeClaim:
@@ -34,6 +40,14 @@ spec:
         - name: nl-weather
           image:
             reference: ghcr.io/isonami/hacs-docker/ha-nl-weather:v0.13.1
+            pullPolicy: IfNotPresent
+        - name: yandex-pogoda
+          image:
+            reference: ghcr.io/isonami/hacs-docker/pogoda-home-assistant:v0.0.10
+            pullPolicy: IfNotPresent
+        - name: weather-forecast-extended
+          image:
+            reference: ghcr.io/isonami/hacs-docker/weather-forecast-extended:1.3.0
             pullPolicy: IfNotPresent
 ---
 apiVersion: v1

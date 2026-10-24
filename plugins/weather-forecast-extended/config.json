@@ -1,0 +1,8 @@
+{
+  "repository": "Thyraz/weather-forecast-extended",
+  "version": "1.3.0",
+  "artifact": "release-source",
+  "type": "frontend",
+  "source_path": "dist",
+  "entrypoint": "weatherforecastextended.js"
+}
