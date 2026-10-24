@@ -1,0 +1,7 @@
+{
+  "repository": "PaulVanSchayck/ha-nl-weather",
+  "version": "v0.13.1",
+  "artifact": "auto",
+  "source_path": "custom_components/nl_weather",
+  "domain": "nl_weather"
+}

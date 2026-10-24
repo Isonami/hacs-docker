@@ -1,0 +1,80 @@
+name: Validate configurations and publish missing versions
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: plugin-tag-synchronization
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.plan.outputs.tags }}
+      has_tags: ${{ steps.plan.outputs.has_tags }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.13"
+      - name: Validate plugin configurations
+        run: |
+          python3 scripts/plugins.py validate
+          python3 scripts/plugins.py check-tags
+      - name: Read existing tags
+        run: git tag --list > "$RUNNER_TEMP/existing-tags"
+      - name: Plan missing tags
+        id: plan
+        run: python3 scripts/plugins.py plan --existing-tags "$RUNNER_TEMP/existing-tags"
+
+  create-tags:
+    if: github.event_name == 'push' && needs.validate.outputs.has_tags == 'true'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAGS_JSON: ${{ needs.validate.outputs.tags }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Create immutable version tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 - <<'PY' > "$RUNNER_TEMP/missing-tags"
+          import json, os
+          for tag in json.loads(os.environ["TAGS_JSON"]):
+              print(tag)
+          PY
+          while IFS= read -r tag; do
+            git tag --annotate "$tag" "$GITHUB_SHA" --message "Publish $tag"
+            git push origin "refs/tags/$tag"
+          done < "$RUNNER_TEMP/missing-tags"
+
+  publish:
+    if: github.event_name == 'push' && needs.validate.outputs.has_tags == 'true'
+    needs: [validate, create-tags]
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.validate.outputs.tags) }}
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/publish-plugin.yml
+    with:
+      tag: ${{ matrix.tag }}
+    secrets: inherit

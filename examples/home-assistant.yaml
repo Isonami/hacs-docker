@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-assistant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: home-assistant
+  template:
+    metadata:
+      labels:
+        app: home-assistant
+    spec:
+      # Uncomment for a private GHCR package.
+      # imagePullSecrets:
+      #   - name: ghcr
+      containers:
+        - name: home-assistant
+          image: ghcr.io/home-assistant/home-assistant:stable
+          ports:
+            - name: http
+              containerPort: 8123
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: nl-weather
+              mountPath: /config/custom_components/nl_weather
+              readOnly: true
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: home-assistant-config
+        - name: nl-weather
+          image:
+            reference: ghcr.io/isonami/hacs-docker/ha-nl-weather:v0.13.1
+            pullPolicy: IfNotPresent
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: home-assistant-config
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

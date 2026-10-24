@@ -1,0 +1,152 @@
+name: Publish plugin image
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Exact repository plugin-version tag
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact repository plugin-version tag to retry
+        required: true
+        type: string
+  push:
+    tags: ["*"]
+
+concurrency:
+  group: publish-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      TARGET_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 1
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.13"
+      - name: Validate tag against configuration
+        id: plugin
+        run: python3 scripts/plugins.py lookup --tag "$TARGET_TAG" --github-output
+      - name: Compute image reference
+        id: image
+        env:
+          PLUGIN_NAME: ${{ steps.plugin.outputs.name }}
+          VERSION: ${{ steps.plugin.outputs.version }}
+        run: |
+          repository="${GITHUB_REPOSITORY,,}"
+          echo "repository=ghcr.io/$repository/$PLUGIN_NAME" >> "$GITHUB_OUTPUT"
+          echo "reference=ghcr.io/$repository/$PLUGIN_NAME:$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check publication state
+        id: state
+        env:
+          IMAGE: ${{ steps.image.outputs.reference }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          image_exists=false
+          release_exists=false
+          digest=""
+          if inspection="$(docker buildx imagetools inspect "$IMAGE" 2>/dev/null)"; then
+            image_exists=true
+            digest="$(printf '%s\n' "$inspection" | awk '/^Digest:/ {print $2; exit}')"
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TARGET_TAG" > "$RUNNER_TEMP/release.json" 2>/dev/null; then
+            release_exists=true
+          fi
+          echo "image_exists=$image_exists" >> "$GITHUB_OUTPUT"
+          echo "release_exists=$release_exists" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          if [[ "$image_exists" == true && "$release_exists" == true ]]; then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+            echo "Image and release already exist; publication is complete."
+          else
+            echo "complete=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download and normalize upstream artifact
+        if: steps.state.outputs.complete != 'true'
+        id: prepare
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 scripts/plugins.py prepare
+          --tag "$TARGET_TAG"
+          --output build/plugin
+          --provenance build/provenance.json
+          --github-output
+      - name: Build and push multi-platform image
+        if: steps.state.outputs.complete != 'true' && steps.state.outputs.image_exists != 'true'
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image.outputs.reference }}
+          labels: |
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}/releases/tag/${{ env.TARGET_TAG }}
+          build-args: |
+            PLUGIN_NAME=${{ steps.plugin.outputs.name }}
+            PLUGIN_DOMAIN=${{ steps.plugin.outputs.domain }}
+            SOURCE_URL=https://github.com/${{ steps.plugin.outputs.repository }}
+            SOURCE_VERSION=${{ steps.plugin.outputs.version }}
+            REVISION=${{ steps.prepare.outputs.resolved_commit }}
+            ARTIFACT_KIND=${{ steps.prepare.outputs.artifact_kind }}
+      - name: Create or repair GitHub Release
+        if: steps.state.outputs.complete != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.image.outputs.reference }}
+          IMAGE_REPOSITORY: ${{ steps.image.outputs.repository }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.state.outputs.digest }}
+          UPSTREAM_REPOSITORY: ${{ steps.plugin.outputs.repository }}
+          UPSTREAM_VERSION: ${{ steps.plugin.outputs.version }}
+          RESOLVED_COMMIT: ${{ steps.prepare.outputs.resolved_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="${BUILT_DIGEST:-$EXISTING_DIGEST}"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid or missing image digest: $digest" >&2
+            exit 1
+          fi
+          immutable="$IMAGE_REPOSITORY@$digest"
+          body="$(cat <<EOF
+          Container image: \`$IMAGE\`
+
+          Immutable reference: \`$immutable\`
+
+          Upstream: https://github.com/$UPSTREAM_REPOSITORY/tree/$UPSTREAM_VERSION
+
+          Resolved upstream commit: \`$RESOLVED_COMMIT\`
+          EOF
+          )"
+          if [[ "${{ steps.state.outputs.release_exists }}" == true ]]; then
+            release_id="$(jq -r .id "$RUNNER_TEMP/release.json")"
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              -f name="$TARGET_TAG" -f body="$body" >/dev/null
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$TARGET_TAG" -f name="$TARGET_TAG" -f body="$body" >/dev/null
+          fi
